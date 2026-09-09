@@ -399,6 +399,23 @@ void InputManager::setRemapCapture(bool active) {
     m_remapCapture = active;
 }
 
+void InputManager::setTakeoverInputActive(bool active) {
+#ifdef Q_OS_LINUX
+    if (!m_lircRemote || m_consumerFd < 0)
+        return;
+    if (m_consumerNotifier)
+        m_consumerNotifier->setEnabled(!active);
+    ioctl(m_consumerFd, EVIOCGRAB, active ? 0 : 1);
+    if (!active) {
+        // Discard any releases queued while the child owned the device.
+        struct input_event ev;
+        while (::read(m_consumerFd, &ev, sizeof(ev)) == ssize_t(sizeof(ev))) {}
+    }
+#else
+    Q_UNUSED(active)
+#endif
+}
+
 #ifdef Q_OS_LINUX
 // Some remote/keyboard USB combos expose their "Consumer Page" HID buttons
 // (Home, Back, Menu, colored buttons, zoom, media transport…) as a *separate*
@@ -423,13 +440,23 @@ void InputManager::openConsumerControlDevice() {
         if (fd < 0)
             continue;
         char name[256] = {0};
-        const bool isConsumerControl = ioctl(fd, EVIOCGNAME(sizeof(name)), name) >= 0
-            && QString::fromUtf8(name).contains(QStringLiteral("Consumer Control"), Qt::CaseInsensitive);
-        if (isConsumerControl) {
+        const bool hasName = ioctl(fd, EVIOCGNAME(sizeof(name)), name) >= 0;
+        const QString deviceName = QString::fromUtf8(name);
+        const bool isConsumerControl = hasName
+            && deviceName.contains(QStringLiteral("Consumer Control"), Qt::CaseInsensitive);
+        const bool isLircRemote = hasName
+            && deviceName.compare(QStringLiteral("lircd-uinput"), Qt::CaseInsensitive) == 0;
+        if (isConsumerControl || isLircRemote) {
             m_consumerFd = fd;
+            m_lircRemote = isLircRemote;
+            // Qt/EGLFS does not reliably classify a lircd-uinput device as a
+            // keyboard. Read it here and grab it so a platform that does see
+            // it cannot deliver every press twice.
+            if (m_lircRemote)
+                ioctl(fd, EVIOCGRAB, 1);
             m_consumerNotifier = new QSocketNotifier(fd, QSocketNotifier::Read, this);
             connect(m_consumerNotifier, &QSocketNotifier::activated, this, &InputManager::onConsumerControlReadable);
-            qInfo("[input] Consumer Control device found: %s (%s)", name, qPrintable(path));
+            qInfo("[input] direct input device found: %s (%s)", name, qPrintable(path));
             return;
         }
         ::close(fd);
@@ -471,9 +498,36 @@ void InputManager::onConsumerControlReadable() {
             continue;
         }
 
-        const Action a = m_keyRemap.value(extendedId, Action::None);
+        Action a = m_keyRemap.value(extendedId, Action::None);
+        if (a == Action::None && m_lircRemote) {
+            switch (ev.code) {
+            case KEY_UP:                         a = Action::Up;     break;
+            case KEY_DOWN:                       a = Action::Down;   break;
+            case KEY_LEFT:                       a = Action::Left;   break;
+            case KEY_RIGHT:                      a = Action::Right;  break;
+            case KEY_OK:
+            case KEY_ENTER:
+            case KEY_SELECT:                     a = Action::Select; break;
+            case KEY_BACK:
+            case KEY_EXIT:
+            case KEY_ESC:                        a = Action::Back;   break;
+            default:                             break;
+            }
+        }
+        if (m_lircRemote && (ev.code == KEY_INFO || ev.code == KEY_EPG || ev.code == KEY_MENU)) {
+            if (ev.value == 1) {
+                setLastInputDevice(QStringLiteral("remote"));
+                const int qtKey = ev.code == KEY_MENU ? Qt::Key_Menu : Qt::Key_Info;
+                postKey(qtKey, QEvent::KeyPress, false);
+            } else {
+                const int qtKey = ev.code == KEY_MENU ? Qt::Key_Menu : Qt::Key_Info;
+                postKey(qtKey, QEvent::KeyRelease, false);
+            }
+            continue;
+        }
         if (a == Action::None)
             continue;
+        setLastInputDevice(m_lircRemote ? QStringLiteral("remote") : QStringLiteral("keyboard"));
         if (ev.value == 1)
             beginPress(a);
         else
@@ -982,6 +1036,15 @@ void InputManager::updateHints() {
     h["back"]       = QStringLiteral("[ESC]");
     h["select"]     = QStringLiteral("[ENTER]");
     h["play_pause"] = QStringLiteral("[SPACE]");
+
+    if (m_lastInputDevice == QStringLiteral("remote")) {
+        h["navigate"] = QStringLiteral("[FRECCE]");
+        h["change"] = QStringLiteral("[◄►]");
+        h["browse"] = QStringLiteral("[►]");
+        h["back"] = QStringLiteral("[BACK]");
+        h["select"] = QStringLiteral("[OK]");
+        h["play_pause"] = QStringLiteral("[PLAY]");
+    }
 
     if (m_lastInputDevice == QStringLiteral("gamepad")) {
         const auto buttonLabel = [this](Action a) -> QString {

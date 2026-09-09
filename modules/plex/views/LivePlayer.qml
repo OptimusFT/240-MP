@@ -22,6 +22,7 @@ FocusScope {
     property string plexToken:     ""
     property bool   playbackStarted: false
     property bool   exiting:        false
+    property bool   openTelevideoAfterPlayback: false
 
     focus: true
 
@@ -53,7 +54,15 @@ FocusScope {
     // mpv has focus and handles these directly. Up/Down drive the OSC here, not
     // channel changes — to switch channels the user exits back to the channel list.
     Keys.onPressed: function(event) {
-        if (event.key === Qt.Key_Escape || event.key === Qt.Key_Back) {
+        if (event.key === Qt.Key_Info) {
+            // Let the normal playback-ended path release the Plex tuner and
+            // DRM resources before the Scripts module hands the screen over.
+            if (!event.isAutoRepeat && !openTelevideoAfterPlayback) {
+                openTelevideoAfterPlayback = true
+                mpvController.sendKey("ESC")
+            }
+            event.accepted = true
+        } else if (event.key === Qt.Key_Escape || event.key === Qt.Key_Back) {
             // Quit mpv; onPlaybackEnded drives the teardown + goBack.
             mpvController.sendKey("ESC")
             event.accepted = true
@@ -109,7 +118,10 @@ FocusScope {
             // Any end (user quit, stream failure, or rare eof) tears down the tuner
             // and returns to the channel list.
             teardown()
-            goBack()
+            if (openTelevideoAfterPlayback)
+                root.openTelevideo()
+            else
+                goBack()
         }
     }
 

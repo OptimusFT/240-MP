@@ -4,7 +4,8 @@
         "color_scheme": "Video 1",
         "screensaver_timeout": "OFF",
         "startup_module": "com.240mp.plex",
-        "video_output_levels": "Limited"
+        "video_output_levels": "Limited",
+        "output_volume": "0dB"
     },
     "modules": {
         "com.240mp.ambient_mode": {

@@ -184,6 +184,14 @@ Window {
 
     // --- SCREEN SAVER STATE ---
     property bool screenSaverActive: false
+    property bool guideLaunchPending: false
+
+    Timer {
+        id: guideLaunchGuard
+        interval: 1500
+        repeat: false
+        onTriggered: root.guideLaunchPending = false
+    }
 
     // Playback counts as user activity even when no key started it (an NFC
     // card tap launches mpv directly). If the saver was showing at launch,
@@ -193,6 +201,40 @@ Window {
         if (!screenSaverActive) return
         screenSaverActive = false
         moduleLoader.forceActiveFocus()
+    }
+
+    // Open the locally installed TV guide from the remote's GUIDE button.
+    // Going through the Scripts module is important on EGLFS: its takeover
+    // runner performs the VT/DRM hand-off before starting the PyQt guide and
+    // restores 240-MP's display when the guide exits.
+    function openTelevideo() {
+        if (guideLaunchPending || scriptsBackend.scriptBusy) return
+        guideLaunchPending = true
+        guideLaunchGuard.restart()
+        dismissScreenSaver()
+        appNavStack.push({
+            source: moduleLoader.source,
+            params: appCurrentParams,
+            listState: {}
+        })
+        appCurrentParams = { script: "televideo.sh", name: "Televideo" }
+        moduleLoader.setSource("modules/scripts/views/Root.qml", {
+            "navParams": appCurrentParams
+        })
+    }
+
+    function openSettings() {
+        if (moduleLoader.source.toString().endsWith("views/Settings.qml")) return
+        dismissScreenSaver()
+        appNavStack.push({
+            source: moduleLoader.source,
+            params: appCurrentParams,
+            listState: {}
+        })
+        appCurrentParams = {}
+        moduleLoader.setSource("views/Settings.qml", {
+            "navParams": appCurrentParams
+        })
     }
 
     // --- APP-LEVEL NAV STACK ---
@@ -228,6 +270,7 @@ Window {
         target: scriptsBackend
         function onScriptRunningChanged() {
             idleTracker.scriptActive = scriptsBackend.scriptBusy
+            inputManager.setTakeoverInputActive(scriptsBackend.scriptBusy)
             idleTracker.resetActivity()
             if (!scriptsBackend.scriptBusy)
                 root.dismissScreenSaver()
@@ -242,7 +285,15 @@ Window {
         source: "views/ModuleList.qml";
 
         Keys.onPressed: (event) => {
-            if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_Q) {
+            if (event.key === Qt.Key_Info) {
+                if (!event.isAutoRepeat)
+                    root.openTelevideo()
+                event.accepted = true
+            } else if (event.key === Qt.Key_Menu) {
+                if (!event.isAutoRepeat)
+                    root.openSettings()
+                event.accepted = true
+            } else if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_Q) {
                 Qt.quit()
             }
         }
