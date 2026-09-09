@@ -258,7 +258,16 @@ Window {
                         params: root.appCurrentParams,
                         listState: {}
                     })
-                    moduleLoader.setSource(entryPoint, { "navParams": { fromAppStartup: true } })
+                    // Optional Plex Live TV auto-tune-on-boot: passed through
+                    // regardless of which module is set to launch on startup.
+                    // A non-Plex module simply ignores the unused param.
+                    var liveChannel = appCore.startupLiveChannel()
+                    moduleLoader.setSource(entryPoint, {
+                        "navParams": {
+                            fromAppStartup: true,
+                            autoLiveChannel: liveChannel
+                        }
+                    })
                 }
             }
         }

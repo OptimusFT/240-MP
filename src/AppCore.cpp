@@ -511,3 +511,14 @@ QString AppCore::startupModuleEntryPoint() const {
     }
     return {};
 }
+
+QString AppCore::startupLiveChannel() const {
+    QJsonObject config = loadConfig();
+    // Lives under the Plex module's own settings (Settings screen entry),
+    // not the app section -- it's a Plex-specific choice, picked from that
+    // module's live channel list.
+    QString channel = config["modules"].toObject()["com.240mp.plex"].toObject()
+                       ["startup_live_channel"].toString();
+    if (channel.isEmpty() || channel == "None") return {};
+    return channel;
+}

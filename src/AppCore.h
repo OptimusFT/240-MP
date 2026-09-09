@@ -47,6 +47,11 @@ public:
     Q_INVOKABLE QString homePath();
     Q_INVOKABLE QString localIpAddress() const;
     Q_INVOKABLE QString startupModuleEntryPoint() const;
+    // Same idea as startupModuleEntryPoint(), but for the optional Plex Live TV
+    // auto-tune-on-boot feature: config[app][startup_live_channel] holds a
+    // channel number (matched against LiveChannels.qml's channel list on the
+    // QML side). Empty/"None" = feature off.
+    Q_INVOKABLE QString startupLiveChannel() const;
     Q_INVOKABLE QString get_module_auth_state(const QString &moduleId);
     // Enabled state of a module by id, resolved the same way the module list
     // resolves it (config override, else manifest default, else true). Unknown

@@ -106,6 +106,11 @@ public:
     // update_live_timeline keeps that tuner alive (state "playing") or releases it
     // (state "stopped"). The grabbed media key is remembered between calls.
     Q_INVOKABLE void load_live_channels();
+    // Dynamic options list for the "startup_live_channel" module setting
+    // (Settings screen). Same channel data as load_live_channels(), reshaped
+    // into {id,label} pairs and emitted via dynamicOptionsReady instead of
+    // liveChannelsLoaded -- see PlexBackend.cpp for the shared fetch helper.
+    Q_INVOKABLE void get_startup_channel_options();
     Q_INVOKABLE void tune_channel(const QString &channelId, const QString &sessionId);
     Q_INVOKABLE void update_live_timeline(const QString &state);
     // Stops the live transcode for sessionId and forgets the tuned key, so the
@@ -238,6 +243,25 @@ private:
                           std::function<void(QString)> callback);
     void probeNext(const QList<QString> &uris, int index,
                    std::function<void(QString)> callback);
+
+    // Shared by load_live_channels() and get_startup_channel_options(): the
+    // /livetv/dvrs -> /media/providers -> lineup chain, as a list of
+    // {channelId, number, title} maps. Also sets m_liveDvrId as a side effect
+    // (same as the old load_live_channels() body did), since tune_channel()
+    // needs it regardless of which caller triggered the fetch.
+    void fetchLiveChannelList(std::function<void(QVariantList)> callback);
+
+    // Connection-health recovery. Called from checkAndRefreshOnStartup()
+    // before every load_libraries(): a cheap reachability probe of the
+    // cached active_server_uri (same any-HTTP-response-counts check as
+    // probeNext), and only on failure, a full re-fetch of this server's
+    // connections from plex.tv followed by a fresh probeConnections() pass
+    // -- i.e. exactly what fetchUsersAndServers() does at login, but
+    // targeted at just the currently active server, so a network change
+    // mid-session (or a login that happened to pick the wrong connection)
+    // can self-heal instead of requiring a manual logout/login. See
+    // DECISIONS.md for the diagnosis this fixes.
+    void verifyOrRefreshServerConnection(std::function<void()> next);
 
     // Browse implementation (separated so startup check can wrap it)
     void load_libraries_impl();

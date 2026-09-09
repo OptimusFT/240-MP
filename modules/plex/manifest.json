@@ -27,6 +27,16 @@
       "requires_auth": true
     },
     {
+      "key": "startup_live_channel",
+      "label": "Live Channel",
+      "type": "list_single",
+      "options_source": "dynamic",
+      "options_slot": "get_startup_channel_options",
+      "default": "None",
+      "requires_auth": true,
+      "description": "Skip the menu and tune straight into this channel when the app launches.\n[NONE] disables this."
+    },
+    {
       "key": "server_machine_id",
       "label": "Server",
       "type": "list_single",

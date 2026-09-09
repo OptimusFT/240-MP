@@ -11,11 +11,18 @@ FocusScope {
 
     signal navigateTo(string path, var params, var listState)
     signal goBack()
+    // Tells Root.qml to drop autoSelectNumber from the params it stores for
+    // this view on its nav stack, so a later return here (after backing out
+    // of LivePlayer) shows the plain channel list instead of re-triggering
+    // the boot auto-select in a loop.
+    signal clearAutoSelect()
 
     property string libraryName: navParams.libraryName || "LIVE TV"
     property var channels: []
     property bool loaded: false
     property string errorMessage: ""
+    property string autoSelectNumber: navParams.autoSelectNumber || ""
+    property bool autoSelectDone: false
 
     Connections {
         target: plexBackend
@@ -27,6 +34,27 @@ FocusScope {
                 var restore = (navListState.currentIndex !== undefined) ? navListState.currentIndex : 0
                 channelList.currentIndex = Math.min(restore, items.length - 1)
                 channelList.positionViewAtIndex(channelList.currentIndex, ListView.Contain)
+
+                // Boot-into-Live-TV: auto-select and play the configured channel,
+                // matched by number. Only fires once per view instance (guarded by
+                // autoSelectDone) and only on the very first load -- so exiting
+                // back to this list later (e.g. after watching) behaves like a
+                // normal channel list, not a loop back into the same channel.
+                if (channelsRoot.autoSelectNumber !== "" && !channelsRoot.autoSelectDone) {
+                    channelsRoot.autoSelectDone = true
+                    for (var i = 0; i < items.length; i++) {
+                        if (items[i].number === channelsRoot.autoSelectNumber) {
+                            channelList.currentIndex = i
+                            channelsRoot.clearAutoSelect()
+                            channelsRoot.navigateTo("LivePlayer.qml", {
+                                channel: items[i]
+                            }, { currentIndex: i })
+                            break
+                        }
+                    }
+                    // No match: fall through silently, the normal channel list
+                    // stays visible so the user can pick manually.
+                }
             }
         }
 
