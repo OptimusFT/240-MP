@@ -1,0 +1,28 @@
+{
+    "app": {
+        "auto_crop": "Off",
+        "color_scheme": "Video 1",
+        "screensaver_timeout": "OFF",
+        "startup_module": "com.240mp.plex",
+        "video_output_levels": "Limited"
+    },
+    "modules": {
+        "com.240mp.ambient_mode": {
+            "enabled": false
+        },
+        "com.240mp.plex": {
+            "current_user_id": "503399118",
+            "enabled": true,
+            "server_machine_id": "226bee3db8f25ab05f77bd909412b7f214d11ce7",
+            "auto_sign_in": true,
+            "startup_live_channel": "2"
+        },
+        "com.240mp.scripts": {
+            "enabled": true,
+            "startup_script": "None"
+        },
+        "com.240mp.weather": {
+            "enabled": false
+        }
+    }
+}
