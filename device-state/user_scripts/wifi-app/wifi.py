@@ -7,6 +7,69 @@ import uuid
 from PyQt5 import QtCore, QtWidgets
 
 
+class RemoteInput(QtCore.QObject):
+    """Turn lircd-uinput events into Qt keys during the display handoff."""
+    def __init__(self, callback, parent=None):
+        super().__init__(parent)
+        self.device = None
+        self.notifier = None
+        try:
+            from evdev import InputDevice, ecodes, list_devices
+            self.ecodes = ecodes
+            for path in list_devices():
+                candidate = InputDevice(path)
+                if candidate.name == 'lircd-uinput':
+                    self.device = candidate
+                    break
+                candidate.close()
+            if not self.device:
+                return
+            self.device.grab()
+            self.callback = callback
+            self.notifier = QtCore.QSocketNotifier(
+                self.device.fd, QtCore.QSocketNotifier.Read, self)
+            self.notifier.activated.connect(self.read_events)
+        except Exception:
+            self.close()
+
+    def read_events(self):
+        try:
+            for event in self.device.read():
+                if event.type != self.ecodes.EV_KEY or event.value != 1:
+                    continue
+                key = {
+                    self.ecodes.KEY_UP: QtCore.Qt.Key_Up,
+                    self.ecodes.KEY_DOWN: QtCore.Qt.Key_Down,
+                    self.ecodes.KEY_LEFT: QtCore.Qt.Key_Left,
+                    self.ecodes.KEY_RIGHT: QtCore.Qt.Key_Right,
+                    self.ecodes.KEY_OK: QtCore.Qt.Key_Return,
+                    self.ecodes.KEY_ENTER: QtCore.Qt.Key_Return,
+                    self.ecodes.KEY_SELECT: QtCore.Qt.Key_Return,
+                    self.ecodes.KEY_BACK: QtCore.Qt.Key_Escape,
+                    self.ecodes.KEY_ESC: QtCore.Qt.Key_Escape,
+                    self.ecodes.KEY_EXIT: QtCore.Qt.Key_Escape,
+                }.get(event.code)
+                if key is not None:
+                    self.callback(key)
+        except BlockingIOError:
+            pass
+        except Exception:
+            self.close()
+
+    def close(self):
+        if self.notifier:
+            self.notifier.setEnabled(False)
+            self.notifier.deleteLater()
+            self.notifier = None
+        if self.device:
+            try:
+                self.device.ungrab()
+            except Exception:
+                pass
+            self.device.close()
+            self.device = None
+
+
 def fields(line):
     result, part, escaped = [], '', False
     for char in line:
@@ -29,6 +92,7 @@ class Wifi(QtWidgets.QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle('Wi-Fi')
+        self.remote = RemoteInput(self.send_key, self)
         self.secret_path = None
         self.networks = []
         self.busy = False
@@ -315,6 +379,7 @@ class Wifi(QtWidgets.QWidget):
             event.ignore()
         else:
             self.clear_secret()
+            self.remote.close()
             event.accept()
 
 

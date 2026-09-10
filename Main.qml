@@ -336,8 +336,10 @@ Window {
             function onGoBack() {
                 if (root.appNavStack.length === 0) return
                 var prev = root.appNavStack.pop()
-                root.appCurrentParams = prev.params
-                moduleLoader.setSource(prev.source, { "navParams": prev.params, "navListState": prev.listState || {} })
+                var restored = Object.assign({}, prev.params)
+                restored.navListState = prev.listState || {}
+                root.appCurrentParams = restored
+                moduleLoader.setSource(prev.source, { "navParams": restored })
             }
 
         }

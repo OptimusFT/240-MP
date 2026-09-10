@@ -14,6 +14,64 @@ BASE = 'http://PMS-LOCAL-IP:8409'
 CACHE = Path.home() / '.cache' / '240mp-televideo'
 WHITE, CYAN, YELLOW, GREEN, RED = '#eeeeee', '#00ffff', '#ffff00', '#40ff60', '#ff6060'
 
+
+class RemoteInput(QtCore.QObject):
+    """Read lircd-uinput directly while 240-MP has handed the display over."""
+    def __init__(self, callback, parent=None):
+        super().__init__(parent)
+        self.device = None
+        self.notifier = None
+        try:
+            from evdev import InputDevice, ecodes, list_devices
+            self.ecodes = ecodes
+            for path in list_devices():
+                candidate = InputDevice(path)
+                if candidate.name == 'lircd-uinput':
+                    self.device = candidate
+                    break
+                candidate.close()
+            if not self.device:
+                return
+            self.device.grab()
+            self.callback = callback
+            self.notifier = QtCore.QSocketNotifier(
+                self.device.fd, QtCore.QSocketNotifier.Read, self)
+            self.notifier.activated.connect(self.read_events)
+        except Exception:
+            self.close()
+
+    def read_events(self):
+        try:
+            for event in self.device.read():
+                if event.type != self.ecodes.EV_KEY or event.value != 1:
+                    continue
+                action = {
+                    self.ecodes.KEY_UP: 'up', self.ecodes.KEY_DOWN: 'down',
+                    self.ecodes.KEY_LEFT: 'left', self.ecodes.KEY_RIGHT: 'right',
+                    self.ecodes.KEY_OK: 'ok', self.ecodes.KEY_ENTER: 'ok',
+                    self.ecodes.KEY_SELECT: 'ok', self.ecodes.KEY_BACK: 'back',
+                    self.ecodes.KEY_ESC: 'back', self.ecodes.KEY_EXIT: 'back',
+                }.get(event.code)
+                if action:
+                    self.callback(action)
+        except BlockingIOError:
+            pass
+        except Exception:
+            self.close()
+
+    def close(self):
+        if self.notifier:
+            self.notifier.setEnabled(False)
+            self.notifier.deleteLater()
+            self.notifier = None
+        if self.device:
+            try:
+                self.device.ungrab()
+            except Exception:
+                pass
+            self.device.close()
+            self.device = None
+
 class Fetch(QtCore.QThread):
     done = QtCore.pyqtSignal(object, str)
     def run(self):
@@ -49,6 +107,7 @@ class Guide(QtWidgets.QWidget):
         self.day = datetime.now(ROME).date()
         self.message = 'CARICAMENTO GUIDA...'
         self.fetcher = None
+        self.remote = RemoteInput(self.action, self)
         self.joysticks = []
         self.pg = None
         try:
@@ -215,6 +274,7 @@ class Guide(QtWidgets.QWidget):
             self.fetcher.finished.connect(self.close)
             event.ignore();return
         if self.pg:self.pg.quit()
+        self.remote.close()
         event.accept()
 
 if __name__=='__main__':
