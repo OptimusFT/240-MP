@@ -1,0 +1,6 @@
+name = Televideo
+mode = takeover
+favorite = yes
+confirm = no
+wait = child
+tty = no

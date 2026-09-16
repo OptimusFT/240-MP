@@ -70,6 +70,12 @@ FocusScope {
             function onReplaceWith(path, params) { moduleRoot.replaceWith(path, params) }
             function onGoBack() { moduleRoot.navigateBack() }
             function onUpdateBackItem(item) { moduleRoot.updateBackItem(item) }
+            // LiveChannels emits this right after it fires the one-time
+            // boot auto-select, so the navStack entry that going back to it
+            // later restores no longer carries autoSelectNumber -- otherwise
+            // every return from LivePlayer would immediately re-tune the
+            // same startup channel instead of showing the plain list.
+            function onClearAutoSelect() { moduleRoot.currentParams = {} }
         }
     }
 
@@ -119,6 +125,14 @@ FocusScope {
             if (autoSignIn !== true && autoSignIn !== "ON") {
                 plexBackend.load_users_from_cache()
                 navigateTo("UserSelect.qml", { reauth: true })
+            } else if (navParams.autoLiveChannel) {
+                // Boot-into-Live-TV: only taken when a user is already signed in
+                // and auto_sign_in is on (same gating as the Libraries branch
+                // below) -- an app-startup config choice, not a profile switch,
+                // so it never bypasses a PIN or profile prompt. If the channel
+                // number no longer matches anything, LiveChannels.qml just shows
+                // the normal channel list instead of erroring.
+                navigateTo("LiveChannels.qml", { autoSelectNumber: navParams.autoLiveChannel })
             } else {
                 navigateTo("Libraries.qml", {})
             }

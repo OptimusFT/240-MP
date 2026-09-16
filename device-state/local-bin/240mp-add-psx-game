@@ -1,0 +1,258 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+usage() {
+    cat <<'EOF'
+Usage:
+  240mp-add-psx-game [--name "Display name"] [--favorite yes|no] SOURCE
+
+SOURCE can be a local .7z path on the Raspberry Pi or a direct HTTP/HTTPS URL.
+The command:
+  - downloads URL sources into the local incoming directory;
+  - checks and extracts the archive without deleting it;
+  - requires exactly one .cue and verifies all files referenced by it;
+  - installs the game below $PSX_ROM_DIR (default: $HOME/roms/psx);
+  - creates a direct 240-MP launcher;
+  - adds only the .cue to the Sony PlayStation RetroArch playlist.
+EOF
+}
+
+die() {
+    printf 'Error: %s\n' "$*" >&2
+    exit 1
+}
+
+display_name=""
+favorite="yes"
+archive=""
+
+while (($#)); do
+    case "$1" in
+        --name)
+            (($# >= 2)) || die "--name requires a value"
+            display_name=$2
+            shift 2
+            ;;
+        --favorite)
+            (($# >= 2)) || die "--favorite requires yes or no"
+            favorite=${2,,}
+            [[ $favorite == yes || $favorite == no ]] || die "--favorite must be yes or no"
+            shift 2
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        --)
+            shift
+            (($# == 1)) || die "provide exactly one archive"
+            archive=$1
+            shift
+            ;;
+        -*)
+            die "unknown option: $1"
+            ;;
+        *)
+            [[ -z $archive ]] || die "provide exactly one archive"
+            archive=$1
+            shift
+            ;;
+    esac
+done
+
+[[ -n $archive ]] || { usage >&2; exit 2; }
+
+for command_name in 7z python3 realpath sha256sum; do
+    command -v "$command_name" >/dev/null 2>&1 || die "required command is missing: $command_name"
+done
+
+config_root=${XDG_CONFIG_HOME:-"$HOME/.config"}
+data_root=${XDG_DATA_HOME:-"$HOME/.local/share"}
+rom_root=${PSX_ROM_DIR:-"$HOME/roms/psx"}
+retroarch_config="$config_root/retroarch/240mp-kms.cfg"
+retroarch_core="$config_root/retroarch/cores/pcsx_rearmed_libretro.so"
+playlist="$config_root/retroarch/playlists/Sony - PlayStation.lpl"
+launcher_root="$data_root/240-MP/user_scripts"
+
+archive_source=$archive
+if [[ $archive_source == http://* || $archive_source == https://* ]]; then
+    command -v curl >/dev/null 2>&1 || die "required command is missing: curl"
+    url_path=${archive_source%%\?*}
+    download_name=$(basename -- "$url_path")
+    [[ ${download_name,,} == *.7z ]] || die "URL must point directly to a .7z file"
+    [[ $download_name != */* && $download_name != *$'\n'* && $download_name != *$'\r'* ]] \
+        || die "unsafe filename in URL"
+    mkdir -p -- "$rom_root/incoming"
+    archive="$rom_root/incoming/$download_name"
+    if [[ -e $archive ]]; then
+        archive="$rom_root/incoming/${download_name%.[7][zZ]}-$(date +%Y%m%d-%H%M%S).7z"
+    fi
+    partial="$archive.part"
+    trap 'rm -f -- "${partial:-}"' EXIT
+    printf 'Downloading archive...\n'
+    curl --fail --location --retry 3 --retry-all-errors --output "$partial" -- "$archive_source"
+    mv -- "$partial" "$archive"
+    partial=""
+    trap - EXIT
+else
+    archive=$(realpath -- "$archive_source")
+fi
+
+[[ -r $archive && -f $archive ]] || die "archive is not a readable file: $archive"
+[[ ${archive,,} == *.7z ]] || die "expected a .7z archive"
+
+[[ -r $retroarch_config ]] || die "RetroArch configuration is missing: $retroarch_config"
+[[ -r $retroarch_core ]] || die "PlayStation core is missing: $retroarch_core"
+
+if [[ -z $display_name ]]; then
+    display_name=$(basename -- "$archive")
+    display_name=${display_name%.[7][zZ]}
+fi
+
+[[ -n $display_name ]] || die "display name cannot be empty"
+[[ $display_name != *$'\n'* && $display_name != *$'\r'* ]] || die "display name cannot contain newlines"
+[[ $display_name != */* ]] || die "display name cannot contain '/'"
+[[ $display_name != . && $display_name != .. ]] || die "invalid display name"
+
+slug=$(printf '%s' "$display_name" \
+    | iconv -f UTF-8 -t ASCII//TRANSLIT 2>/dev/null \
+    | tr '[:upper:]' '[:lower:]' \
+    | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//' || true)
+[[ -n $slug ]] || slug="psx-$(printf '%s' "$display_name" | sha256sum | cut -c1-10)"
+
+destination="$rom_root/$display_name"
+launcher="$launcher_root/launch-$slug.sh"
+metadata="$launcher_root/launch-$slug.txt"
+
+[[ ! -e $destination ]] || die "destination already exists: $destination"
+[[ ! -e $launcher && ! -e $metadata ]] || die "launcher already exists for: $display_name"
+
+mkdir -p -- "$rom_root" "$launcher_root" "$(dirname -- "$playlist")"
+stage=$(mktemp -d "$rom_root/.import-XXXXXX")
+launcher_tmp=$(mktemp "$launcher_root/.launch-XXXXXX.sh")
+metadata_tmp=$(mktemp "$launcher_root/.launch-XXXXXX.txt")
+
+cleanup() {
+    if [[ -n ${stage:-} && $stage == "$rom_root"/.import-* && -d $stage ]]; then
+        rm -rf -- "$stage"
+    fi
+    [[ -z ${launcher_tmp:-} || ! -e $launcher_tmp ]] || rm -f -- "$launcher_tmp"
+    [[ -z ${metadata_tmp:-} || ! -e $metadata_tmp ]] || rm -f -- "$metadata_tmp"
+}
+trap cleanup EXIT
+
+printf 'Testing archive...\n'
+7z t -- "$archive" >/dev/null
+
+printf 'Extracting to a temporary directory...\n'
+7z x -y -o"$stage" -- "$archive" >/dev/null
+
+if find "$stage" -type l -print -quit | grep -q .; then
+    die "archives containing symbolic links are not supported"
+fi
+
+mapfile -d '' -t cue_files < <(find "$stage" -type f -iname '*.cue' -print0)
+((${#cue_files[@]} == 1)) || die "archive must contain exactly one .cue file (found ${#cue_files[@]})"
+
+cue=${cue_files[0]}
+cue_dir=$(dirname -- "$cue")
+cue_refs=0
+while IFS= read -r line || [[ -n $line ]]; do
+    reference=""
+    if [[ $line =~ ^[[:space:]]*[Ff][Ii][Ll][Ee][[:space:]]+\"([^\"]+)\" ]]; then
+        reference=${BASH_REMATCH[1]}
+    elif [[ $line =~ ^[[:space:]]*[Ff][Ii][Ll][Ee][[:space:]]+([^[:space:]]+)[[:space:]]+ ]]; then
+        reference=${BASH_REMATCH[1]}
+    fi
+    [[ -n $reference ]] || continue
+    ((cue_refs += 1))
+    [[ $reference != /* && $reference != *'..'* ]] || die "unsafe path in cue sheet: $reference"
+    [[ -f "$cue_dir/$reference" ]] || die "cue sheet references a missing file: $reference"
+done < "$cue"
+((cue_refs > 0)) || die "cue sheet contains no FILE entries"
+
+cue_relative=${cue#"$stage"/}
+installed_cue="$destination/$cue_relative"
+rom_relative=${installed_cue#"$rom_root"/}
+
+{
+    printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail'
+    printf 'content_relative=%q\n' "$rom_relative"
+    cat <<'EOF'
+config="${XDG_CONFIG_HOME:-$HOME/.config}/retroarch/240mp-kms.cfg"
+core="${XDG_CONFIG_HOME:-$HOME/.config}/retroarch/cores/pcsx_rearmed_libretro.so"
+content="${PSX_ROM_DIR:-$HOME/roms/psx}/$content_relative"
+log="${XDG_STATE_HOME:-$HOME/.local/state}/240-MP/retroarch.log"
+for required in "$config" "$core" "$content"; do
+    [[ -r $required ]] || { printf 'Required file is missing: %s\n' "$required" >&2; exit 2; }
+done
+mkdir -p -- "$(dirname -- "$log")"
+exec /usr/bin/retroarch --fullscreen --verbose --config "$config" -L "$core" "$content" >>"$log" 2>&1
+EOF
+} > "$launcher_tmp"
+chmod 0755 "$launcher_tmp"
+
+{
+    printf 'name = %s\n' "$display_name"
+    printf '%s\n' 'mode = takeover' "favorite = $favorite" 'confirm = no' 'args =' 'wait = pgroup' 'tty = no'
+} > "$metadata_tmp"
+
+printf 'Installing game files...\n'
+mv -- "$stage" "$destination"
+stage=""
+mv -- "$launcher_tmp" "$launcher"
+launcher_tmp=""
+mv -- "$metadata_tmp" "$metadata"
+metadata_tmp=""
+
+python3 - "$playlist" "$installed_cue" "$display_name" "$retroarch_core" <<'PY'
+import json
+import os
+from pathlib import Path
+import sys
+
+playlist_path = Path(sys.argv[1])
+cue_path, label, core_path = sys.argv[2:]
+empty = {
+    "version": "1.5",
+    "default_core_path": "",
+    "default_core_name": "",
+    "label_display_mode": 0,
+    "right_thumbnail_mode": 0,
+    "left_thumbnail_mode": 0,
+    "thumbnail_match_mode": 0,
+    "sort_mode": 0,
+    "items": [],
+}
+
+if playlist_path.exists():
+    try:
+        data = json.loads(playlist_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"Cannot read playlist {playlist_path}: {exc}")
+else:
+    data = empty
+
+items = [item for item in data.get("items", []) if item.get("path") != cue_path]
+items.append({
+    "path": cue_path,
+    "label": label,
+    "core_path": core_path,
+    "core_name": "Sony - PlayStation (PCSX ReARMed)",
+    "crc32": "",
+    "db_name": "Sony - PlayStation",
+})
+data["items"] = sorted(items, key=lambda item: item.get("label", "").casefold())
+
+temporary = playlist_path.with_name(playlist_path.name + ".tmp")
+temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+os.replace(temporary, playlist_path)
+PY
+
+mkdir -p -- "$data_root/retroarch/saves/PCSX-ReARMed" "$data_root/retroarch/states/PCSX-ReARMed"
+
+printf '\nInstalled: %s\n' "$display_name"
+printf 'Launcher: %s\n' "$launcher"
+printf 'Playlist entry: %s\n' "$playlist"
+printf 'Archive retained: %s\n' "$archive"
+printf 'Use Right on the selected script in 240-MP to toggle its home-screen favorite.\n'

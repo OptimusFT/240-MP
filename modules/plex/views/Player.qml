@@ -51,6 +51,7 @@ FocusScope {
 
     property bool stoppedReported:    false
     property bool playbackStarted:    false
+    property bool openTelevideoAfterPlayback: false
     property bool overlayVisible:     false
     property int  choiceIndex:        0
     property string resumeSetting:    "ask"
@@ -69,6 +70,20 @@ FocusScope {
     focus: true
 
     Keys.onPressed: function(event) {
+        if (event.key === Qt.Key_Info) {
+            if (!event.isAutoRepeat && !openTelevideoAfterPlayback) {
+                if (overlayVisible || streamUrl === "") {
+                    root.openTelevideo()
+                } else {
+                    // Wait for mpv's normal shutdown callback so playback progress
+                    // is saved before the guide takes over the display.
+                    openTelevideoAfterPlayback = true
+                    mpvController.sendKey("ESC")
+                }
+            }
+            event.accepted = true
+            return
+        }
         if (overlayVisible) {
             if (event.key === Qt.Key_Escape || event.key === Qt.Key_Backspace || event.key === Qt.Key_Back) {
                 goBack()
@@ -385,6 +400,11 @@ FocusScope {
         }
 
         function onPlaybackEnded(finalPositionMs, finalDurationMs, reason) {
+            if (openTelevideoAfterPlayback) {
+                reportStopped(finalPositionMs, finalDurationMs)
+                root.openTelevideo()
+                return
+            }
             if (reason === "failed") {
                 if (!isTranscoding) {
                     // Direct play failed (e.g. HTTP 500 from PMS on WAN). Retry

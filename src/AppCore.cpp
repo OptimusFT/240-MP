@@ -8,7 +8,29 @@
 #include <QDebug>
 #include <QRegularExpression>
 #include <QNetworkInterface>
+#include <QProcess>
 #include <QQmlContext>
+
+namespace {
+bool applyOutputVolume(const QString &level)
+{
+#ifdef Q_OS_LINUX
+    static const QStringList allowed = {
+        QStringLiteral("-30dB"), QStringLiteral("-20dB"),
+        QStringLiteral("-10dB"), QStringLiteral("0dB")
+    };
+    if (!allowed.contains(level))
+        return false;
+    return QProcess::execute(QStringLiteral("/usr/bin/amixer"),
+                             {QStringLiteral("-q"), QStringLiteral("-c"),
+                              QStringLiteral("0"), QStringLiteral("sset"),
+                              QStringLiteral("PCM"), level}) == 0;
+#else
+    Q_UNUSED(level)
+    return true;
+#endif
+}
+}
 
 AppCore::AppCore(const QString &appRoot, const QString &dataRoot, QObject *parent)
     : QObject(parent), m_appRoot(appRoot), m_dataRoot(dataRoot)
@@ -44,6 +66,10 @@ AppCore::AppCore(const QString &appRoot, const QString &dataRoot, QObject *paren
         m_modules.append(m);
         qDebug("[AppCore] Loaded manifest: %s", qPrintable(id));
     }
+
+    const QString savedOutputVolume = loadConfig()["app"].toObject()["output_volume"].toString();
+    if (!savedOutputVolume.isEmpty() && !applyOutputVolume(savedOutputVolume))
+        qWarning("[AppCore] Could not apply saved output volume: %s", qPrintable(savedOutputVolume));
 }
 
 // ---------------------------------------------------------------------------
@@ -213,6 +239,11 @@ void AppCore::save_setting(const QString &moduleId, const QString &key, const QV
 
     setTarget(target);
     saveConfig(config);
+
+    if (moduleId.isEmpty() && key == QStringLiteral("output_volume")
+        && !applyOutputVolume(value.toString())) {
+        qWarning("[AppCore] Could not apply output volume: %s", qPrintable(value.toString()));
+    }
 
     qDebug("[AppCore] Setting saved: %s.%s = %s",
            qPrintable(moduleId.isEmpty() ? "app" : moduleId),
@@ -510,4 +541,15 @@ QString AppCore::startupModuleEntryPoint() const {
         }
     }
     return {};
+}
+
+QString AppCore::startupLiveChannel() const {
+    QJsonObject config = loadConfig();
+    // Lives under the Plex module's own settings (Settings screen entry),
+    // not the app section -- it's a Plex-specific choice, picked from that
+    // module's live channel list.
+    QString channel = config["modules"].toObject()["com.240mp.plex"].toObject()
+                       ["startup_live_channel"].toString();
+    if (channel.isEmpty() || channel == "None") return {};
+    return channel;
 }

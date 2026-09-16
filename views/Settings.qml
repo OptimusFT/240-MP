@@ -141,6 +141,25 @@ FocusScope {
             moduleId: ""
         })
 
+        // Hardware output level for the Raspberry Pi. The displayed percentages
+        // are friendly presets; the stored values are capped at 0 dB to avoid
+        // clipping. TV volume buttons remain entirely independent.
+        var volumeLabels = ["25%", "50%", "75%", "100%"]
+        var volumeValues = ["-30dB", "-20dB", "-10dB", "0dB"]
+        var savedVolume = appSettings["output_volume"] || "-20dB"
+        var volumeIndex = volumeValues.indexOf(savedVolume)
+        if (volumeIndex < 0) volumeIndex = 1
+        items.push({
+            type: "list_single",
+            key: "output_volume",
+            label: "Raspberry Volume",
+            options: volumeLabels,
+            values: volumeValues,
+            value: volumeLabels[volumeIndex],
+            description: "Set the Raspberry audio output level (maximum 0 dB)",
+            moduleId: ""
+        })
+
         // MODULES section — only show modules with has_settings
         var hasModuleSettings = false
         for (var i = 0; i < installedModules.length; i++) {

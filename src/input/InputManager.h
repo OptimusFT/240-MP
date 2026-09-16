@@ -56,6 +56,9 @@ public:
     // default key). Synthesized gamepad key events keep flowing to QML so a
     // pad's Back button can still cancel the overlay.
     Q_INVOKABLE void setRemapCapture(bool active);
+    // Takeover scripts (Televideo/Wi-Fi) run as a separate EGLFS process and
+    // need the physical remote themselves while 240-MP has released the VT.
+    Q_INVOKABLE void setTakeoverInputActive(bool active);
 
 signals:
     void gamepadConnectedChanged();
@@ -160,6 +163,7 @@ private:
 #ifdef Q_OS_LINUX
     int m_consumerFd = -1;
     QSocketNotifier *m_consumerNotifier = nullptr;
+    bool m_lircRemote = false;
 #endif
 
     QString m_lastInputDevice = "keyboard";

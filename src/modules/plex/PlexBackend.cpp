@@ -421,18 +421,25 @@ void PlexBackend::checkAndRefreshOnStartup(std::function<void()> callback) {
     // means the device was deauthorized via the Plex admin UI. Check runs once
     // per session; subsequent load_libraries calls skip it via m_deviceVerified.
     auto proceed = [this, callback]() {
-        if (m_deviceVerified) { callback(); return; }
-        auto *reply = plexGet(QUrl(PLEX_TV + "/api/v2/resources"), accountToken());
-        connect(reply, &QNetworkReply::finished, this, [this, reply, callback]() {
-            reply->deleteLater();
-            int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-            if (status == 401) {
-                qWarning("[PlexBackend] Device no longer authorized — triggering reauth");
-                emit authRevoked();
-                return;
-            }
-            m_deviceVerified = true;
-            callback();
+        // Runs on every load_libraries() call (cheap when the connection is
+        // fine), unlike the 401 device-authorization check below which only
+        // runs once per session -- a network change can happen at any point
+        // while the app keeps running, so this can't be a once-per-session
+        // gate too.
+        verifyOrRefreshServerConnection([this, callback]() {
+            if (m_deviceVerified) { callback(); return; }
+            auto *reply = plexGet(QUrl(PLEX_TV + "/api/v2/resources"), accountToken());
+            connect(reply, &QNetworkReply::finished, this, [this, reply, callback]() {
+                reply->deleteLater();
+                int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+                if (status == 401) {
+                    qWarning("[PlexBackend] Device no longer authorized — triggering reauth");
+                    emit authRevoked();
+                    return;
+                }
+                m_deviceVerified = true;
+                callback();
+            });
         });
     };
 
@@ -442,6 +449,111 @@ void PlexBackend::checkAndRefreshOnStartup(std::function<void()> callback) {
     } else {
         proceed();
     }
+}
+
+void PlexBackend::verifyOrRefreshServerConnection(std::function<void()> next) {
+    QString uri = serverUrl();
+    if (uri.isEmpty()) { next(); return; }
+
+    auto *reply = plexGet(QUrl(uri + "/"), {});
+    auto *timer = new QTimer(this);
+    timer->setSingleShot(true);
+    timer->setInterval(3000);
+    connect(timer, &QTimer::timeout, this, [reply, timer]() {
+        timer->deleteLater();
+        reply->abort();
+    });
+    timer->start();
+
+    connect(reply, &QNetworkReply::finished, this, [this, reply, timer, next]() {
+        timer->stop();
+        timer->deleteLater();
+        reply->deleteLater();
+
+        // Any HTTP response (even an auth challenge) means the host answered --
+        // same definition probeNext() uses. Nothing to fix.
+        if (reply->error() == QNetworkReply::NoError ||
+            reply->error() == QNetworkReply::AuthenticationRequiredError) {
+            next();
+            return;
+        }
+
+        QString mid = loadAuth()["active_server_machine_id"].toString();
+        if (mid.isEmpty()) { next(); return; }
+
+        qWarning().noquote() << "[PlexAuth] active_server_uri unreachable, "
+                                 "re-discovering connections for" << mid;
+
+        QUrl resUrl(PLEX_TV + "/api/v2/resources");
+        QUrlQuery q;
+        q.addQueryItem("includeHttps", "1");
+        q.addQueryItem("includeRelay", "1");
+        q.addQueryItem("includeIPv6", "1");
+        resUrl.setQuery(q);
+        auto *resReply = plexGet(resUrl, accountToken());
+        connect(resReply, &QNetworkReply::finished, this, [this, resReply, mid, next]() {
+            resReply->deleteLater();
+            if (resReply->error() != QNetworkReply::NoError) { next(); return; }
+
+            QJsonArray connections;
+            QString name;
+            for (const auto &rv : QJsonDocument::fromJson(resReply->readAll()).array()) {
+                QJsonObject r = rv.toObject();
+                if (r["clientIdentifier"].toString() == mid) {
+                    connections = r["connections"].toArray();
+                    name        = r["name"].toString().toUpper();
+                    break;
+                }
+            }
+            if (connections.isEmpty()) { next(); return; }
+
+            // Reuses the exact same local -> remote -> relay probing that
+            // fetchUsersAndServers() runs at login (probeConnections
+            // determines priority order and probeNext does the reachability
+            // check), so recovery picks connections the same way the app
+            // already trusts elsewhere.
+            probeConnections(connections, [this, mid, name, connections, next](QString newUri) {
+                if (newUri.isEmpty()) { next(); return; }
+
+                bool isLocal = false, isRelay = false;
+                for (const auto &cv : connections) {
+                    QJsonObject c = cv.toObject();
+                    if (c["uri"].toString() == newUri) {
+                        isLocal = c["local"].toBool();
+                        isRelay = c["relay"].toBool();
+                        break;
+                    }
+                }
+
+                QJsonObject auth = loadAuth();
+                auth["active_server_uri"] = newUri;
+                QJsonArray servers = auth["servers"].toArray();
+                bool found = false;
+                for (int i = 0; i < servers.size(); ++i) {
+                    QJsonObject s = servers[i].toObject();
+                    if (s["machineId"].toString() == mid) {
+                        s["uri"] = newUri; s["local"] = isLocal; s["relay"] = isRelay;
+                        servers[i] = s;
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    QJsonObject s;
+                    s["machineId"] = mid; s["name"] = name;
+                    s["uri"] = newUri; s["local"] = isLocal; s["relay"] = isRelay;
+                    servers.append(s);
+                }
+                auth["servers"] = servers;
+                saveAuth(auth);
+
+                qWarning().noquote() << "[PlexAuth] Reconnected to" << name << "via"
+                                     << (isRelay ? "relay" : (isLocal ? "local" : "remote"))
+                                     << "after network change";
+                next();
+            });
+        });
+    });
 }
 
 void PlexBackend::migrateLegacyToken(std::function<void()> callback) {
@@ -2539,16 +2651,16 @@ void PlexBackend::set_subtitle_stream(const QString &streamId, const QString &pa
 // parse + streamUrlReady hand-off as request_transcode.
 // ---------------------------------------------------------------------------
 
-void PlexBackend::load_live_channels() {
+void PlexBackend::fetchLiveChannelList(std::function<void(QVariantList)> callback) {
     QString uri = serverUrl(), token = serverToken();
     if (uri.isEmpty()) { emit errorOccurred("NO SERVER CONFIGURED"); return; }
 
     auto *reply = plexGet(QUrl(uri + "/livetv/dvrs"), token);
-    connect(reply, &QNetworkReply::finished, this, [this, reply, uri, token]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, uri, token, callback]() {
         reply->deleteLater();
         if (reply->error() != QNetworkReply::NoError) {
             if (reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() == 498) {
-                handle498([this]{ load_live_channels(); }); return;
+                handle498([this, callback]{ fetchLiveChannelList(callback); }); return;
             }
             emit errorOccurred("LOAD DVRS FAILED: " + reply->errorString()); return;
         }
@@ -2567,7 +2679,7 @@ void PlexBackend::load_live_channels() {
         }
         if (m_liveDvrId.isEmpty() || lineup.isEmpty()) {
             qDebug() << "[Plex] No tunable DVR/lineup in /livetv/dvrs";
-            emit liveChannelsLoaded(QVariantList{});
+            callback(QVariantList{});
             return;
         }
 
@@ -2577,7 +2689,7 @@ void PlexBackend::load_live_channels() {
         // but routes everyone through this provider-proxy path uniformly, so it
         // works regardless of account type.
         auto *provReply = plexGet(QUrl(uri + "/media/providers"), token);
-        connect(provReply, &QNetworkReply::finished, this, [this, uri, token, provReply]() {
+        connect(provReply, &QNetworkReply::finished, this, [this, uri, token, provReply, callback]() {
             provReply->deleteLater();
             if (provReply->error() != QNetworkReply::NoError) {
                 emit errorOccurred("LOAD PROVIDERS FAILED: " + provReply->errorString()); return;
@@ -2594,12 +2706,12 @@ void PlexBackend::load_live_channels() {
             }
             if (providerId.isEmpty()) {
                 qDebug() << "[Plex] No livetv media provider in /media/providers";
-                emit liveChannelsLoaded(QVariantList{});
+                callback(QVariantList{});
                 return;
             }
 
             auto *chReply = plexGet(QUrl(uri + "/" + providerId + "/lineups/dvr/channels"), token);
-            connect(chReply, &QNetworkReply::finished, this, [this, chReply]() {
+            connect(chReply, &QNetworkReply::finished, this, [this, chReply, callback]() {
                 chReply->deleteLater();
                 if (chReply->error() != QNetworkReply::NoError) {
                     emit errorOccurred("LOAD CHANNELS FAILED: " + chReply->errorString()); return;
@@ -2622,9 +2734,38 @@ void PlexBackend::load_live_channels() {
                 }
                 if (channels.isEmpty())
                     qDebug() << "[Plex] Live lineup parsed empty — raw:" << body.left(800);
-                emit liveChannelsLoaded(channels);
+                callback(channels);
             });
         });
+    });
+}
+
+void PlexBackend::load_live_channels() {
+    fetchLiveChannelList([this](QVariantList channels) {
+        emit liveChannelsLoaded(channels);
+    });
+}
+
+// Dynamic options for the "startup_live_channel" Settings entry. Same channel
+// data as load_live_channels(), reshaped into the {id,label} pairs
+// ModuleSettings.qml expects, with a leading "NONE" entry to turn the feature
+// off. "id" is the channel number (not channelId) so it matches directly
+// against LiveChannels.qml's autoSelectNumber comparison at boot.
+void PlexBackend::get_startup_channel_options() {
+    fetchLiveChannelList([this](QVariantList channels) {
+        QVariantList options;
+        options.append(QVariantMap{{"id", "None"}, {"label", "NONE"}});
+        for (const auto &cv : channels) {
+            QVariantMap c = cv.toMap();
+            QString number = c["number"].toString();
+            QString title  = c["title"].toString();
+            if (number.isEmpty()) continue;
+            options.append(QVariantMap{
+                {"id",    number},
+                {"label", number + "  " + title},
+            });
+        }
+        emit dynamicOptionsReady("startup_live_channel", options);
     });
 }
 

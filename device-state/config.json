@@ -1,0 +1,36 @@
+{
+    "app": {
+        "auto_crop": "On",
+        "color_scheme": "Video 1",
+        "output_volume": "0dB",
+        "screensaver_timeout": "30",
+        "startup_module": "None",
+        "video_output_levels": "Auto"
+    },
+    "modules": {
+        "com.240mp.ambient_mode": {
+            "enabled": false
+        },
+        "com.240mp.emby": {
+            "enabled": false
+        },
+        "com.240mp.local_files": {
+            "enabled": false
+        },
+        "com.240mp.plex": {
+            "auto_sign_in": true,
+            "autoplay_next_episode": true,
+            "enabled": true,
+            "resume_playback": "ask",
+            "startup_live_channel": "2",
+            "video_quality": "2000"
+        },
+        "com.240mp.scripts": {
+            "enabled": true,
+            "startup_script": "None"
+        },
+        "com.240mp.weather": {
+            "enabled": false
+        }
+    }
+}

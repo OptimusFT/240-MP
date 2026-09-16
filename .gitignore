@@ -16,3 +16,13 @@ Thumbs.db
 /.appimage-tools
 /.mpv-build
 /*.AppImage
+
+# Never snapshot private device data
+/device-state/**/plex_auth.json
+/device-state/**/*.pem
+/device-state/retroarch/cores/
+/device-state/retroarch/system/
+/device-state/retroarch/playlists/
+/device-state/retroarch/saves/
+/device-state/retroarch/states/
+/device-state/roms/

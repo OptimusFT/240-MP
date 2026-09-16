@@ -1,0 +1,28 @@
+# 240-MP script metadata for launch-retroarch.sh
+# Whole-line comments only. Unknown keys are ignored.
+# Delete this file to regenerate it with defaults.
+
+# Row label shown in 240-MP.
+name = RetroArch
+
+# console  = 240-MP stays on screen and shows this script's output.
+# takeover = the script gets the whole screen (a TV app, a game front end).
+mode = takeover
+
+# yes = also show this script on the main menu.
+favorite = no
+
+# yes = ask for confirmation before running.
+confirm = no
+
+# Extra arguments passed to the script. Split on spaces, quotes respected.
+# Not a shell: $VARIABLES, globs and pipes are not expanded.
+args =
+
+# takeover only. pgroup = wait for everything the script started before
+# taking the screen back; child = wait only for the script itself.
+wait = pgroup
+
+# takeover on Linux only, and needs a udev rule (see INSTALL.md).
+# yes = give the script a real terminal, for one that needs typed input.
+tty = no
