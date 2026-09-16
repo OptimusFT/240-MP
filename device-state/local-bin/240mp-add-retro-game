@@ -1,0 +1,434 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+usage() {
+    cat <<'EOF'
+Usage:
+  240mp-add-retro-game [--system SYSTEM] [--name "Display name"] [--favorite yes|no] SOURCE
+
+SYSTEM:
+  auto, ps1, nes, snes, megadrive, mastersystem, gamegear,
+  gb, gbc, gba, n64, pcengine, arcade
+
+SOURCE can be a local .7z path on the Raspberry Pi or a direct HTTP/HTTPS URL.
+With --system auto, the archive is classified from its ROM extensions. Ambiguous
+formats must be selected explicitly by the caller.
+EOF
+}
+
+die() {
+    printf 'Error: %s\n' "$*" >&2
+    exit 1
+}
+
+system="auto"
+display_name=""
+favorite="yes"
+archive=""
+
+while (($#)); do
+    case "$1" in
+        --system)
+            (($# >= 2)) || die "--system requires a value"
+            system=${2,,}
+            shift 2
+            ;;
+        --name)
+            (($# >= 2)) || die "--name requires a value"
+            display_name=$2
+            shift 2
+            ;;
+        --favorite)
+            (($# >= 2)) || die "--favorite requires yes or no"
+            favorite=${2,,}
+            [[ $favorite == yes || $favorite == no ]] || die "--favorite must be yes or no"
+            shift 2
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        --)
+            shift
+            (($# == 1)) || die "provide exactly one archive"
+            archive=$1
+            shift
+            ;;
+        -*)
+            die "unknown option: $1"
+            ;;
+        *)
+            [[ -z $archive ]] || die "provide exactly one archive"
+            archive=$1
+            shift
+            ;;
+    esac
+done
+
+[[ -n $archive ]] || { usage >&2; exit 2; }
+
+declare -A SYSTEM_NAME=(
+    [ps1]="Sony PlayStation"
+    [nes]="Nintendo Entertainment System"
+    [snes]="Super Nintendo"
+    [megadrive]="Sega Mega Drive / Genesis"
+    [mastersystem]="Sega Master System"
+    [gamegear]="Sega Game Gear"
+    [gb]="Nintendo Game Boy"
+    [gbc]="Nintendo Game Boy Color"
+    [gba]="Nintendo Game Boy Advance"
+    [n64]="Nintendo 64"
+    [pcengine]="NEC PC Engine / TurboGrafx-16"
+    [arcade]="Arcade"
+)
+
+declare -A ROM_FOLDER=(
+    [ps1]="psx"
+    [nes]="nes"
+    [snes]="snes"
+    [megadrive]="megadrive"
+    [mastersystem]="mastersystem"
+    [gamegear]="gamegear"
+    [gb]="gb"
+    [gbc]="gbc"
+    [gba]="gba"
+    [n64]="n64"
+    [pcengine]="pcengine"
+    [arcade]="arcade"
+)
+
+declare -A PLAYLIST=(
+    [ps1]="Sony - PlayStation.lpl"
+    [nes]="Nintendo - Nintendo Entertainment System.lpl"
+    [snes]="Nintendo - Super Nintendo Entertainment System.lpl"
+    [megadrive]="Sega - Mega Drive - Genesis.lpl"
+    [mastersystem]="Sega - Master System - Mark III.lpl"
+    [gamegear]="Sega - Game Gear.lpl"
+    [gb]="Nintendo - Game Boy.lpl"
+    [gbc]="Nintendo - Game Boy Color.lpl"
+    [gba]="Nintendo - Game Boy Advance.lpl"
+    [n64]="Nintendo - Nintendo 64.lpl"
+    [pcengine]="NEC - PC Engine - TurboGrafx 16.lpl"
+    [arcade]="Arcade.lpl"
+)
+
+declare -A CORE_CANDIDATES=(
+    [ps1]="pcsx_rearmed_libretro.so swanstation_libretro.so beetle_psx_hw_libretro.so beetle_psx_libretro.so"
+    [nes]="fceumm_libretro.so nestopia_libretro.so"
+    [snes]="snes9x_libretro.so snes9x2005_plus_libretro.so snes9x2005_libretro.so"
+    [megadrive]="genesis_plus_gx_libretro.so picodrive_libretro.so"
+    [mastersystem]="genesis_plus_gx_libretro.so picodrive_libretro.so"
+    [gamegear]="genesis_plus_gx_libretro.so picodrive_libretro.so"
+    [gb]="gambatte_libretro.so mgba_libretro.so"
+    [gbc]="gambatte_libretro.so mgba_libretro.so"
+    [gba]="mgba_libretro.so gpsp_libretro.so"
+    [n64]="mupen64plus_next_libretro.so parallel_n64_libretro.so"
+    [pcengine]="beetle_pce_fast_libretro.so beetle_pce_libretro.so"
+    [arcade]="fbneo_libretro.so mame2003_plus_libretro.so"
+)
+
+if [[ $system != auto && -z ${SYSTEM_NAME[$system]+x} ]]; then
+    die "unsupported system: $system"
+fi
+
+for command_name in 7z python3 realpath sha256sum iconv; do
+    command -v "$command_name" >/dev/null 2>&1 || die "required command is missing: $command_name"
+done
+
+config_root=${XDG_CONFIG_HOME:-"$HOME/.config"}
+data_root=${XDG_DATA_HOME:-"$HOME/.local/share"}
+rom_root=${RETRO_ROM_DIR:-"$HOME/roms"}
+retroarch_config="$config_root/retroarch/240mp-kms.cfg"
+core_root="$config_root/retroarch/cores"
+playlist_root="$config_root/retroarch/playlists"
+launcher_root="$data_root/240-MP/user_scripts"
+
+archive_source=$archive
+if [[ $archive_source == http://* || $archive_source == https://* ]]; then
+    command -v curl >/dev/null 2>&1 || die "required command is missing: curl"
+    url_path=${archive_source%%\?*}
+    download_name=$(basename -- "$url_path")
+    [[ ${download_name,,} == *.7z ]] || die "URL must point directly to a .7z file"
+    [[ $download_name != */* && $download_name != *$'\n'* && $download_name != *$'\r'* ]] \
+        || die "unsafe filename in URL"
+    mkdir -p -- "$rom_root/incoming"
+    archive="$rom_root/incoming/$download_name"
+    if [[ -e $archive ]]; then
+        archive="$rom_root/incoming/${download_name%.[7][zZ]}-$(date +%Y%m%d-%H%M%S).7z"
+    fi
+    partial="$archive.part"
+    trap 'rm -f -- "${partial:-}"' EXIT
+    printf 'Downloading archive...\n'
+    curl --fail --location --retry 3 --retry-all-errors --output "$partial" -- "$archive_source"
+    mv -- "$partial" "$archive"
+    partial=""
+    trap - EXIT
+else
+    archive=$(realpath -- "$archive_source")
+fi
+
+[[ -r $archive && -f $archive ]] || die "archive is not a readable file: $archive"
+[[ ${archive,,} == *.7z ]] || die "expected a .7z archive"
+[[ -r $retroarch_config ]] || die "RetroArch configuration is missing: $retroarch_config"
+
+if [[ -z $display_name ]]; then
+    display_name=$(basename -- "$archive")
+    display_name=${display_name%.[7][zZ]}
+fi
+
+[[ -n $display_name ]] || die "display name cannot be empty"
+[[ $display_name != *$'\n'* && $display_name != *$'\r'* ]] || die "display name cannot contain newlines"
+[[ $display_name != */* ]] || die "display name cannot contain '/'"
+[[ $display_name != . && $display_name != .. ]] || die "invalid display name"
+
+mkdir -p -- "$rom_root" "$launcher_root" "$playlist_root"
+stage=$(mktemp -d "$rom_root/.import-XXXXXX")
+launcher_tmp=$(mktemp "$launcher_root/.launch-XXXXXX.sh")
+metadata_tmp=$(mktemp "$launcher_root/.launch-XXXXXX.txt")
+
+cleanup() {
+    if [[ -n ${stage:-} && $stage == "$rom_root"/.import-* && -d $stage ]]; then
+        rm -rf -- "$stage"
+    fi
+    [[ -z ${launcher_tmp:-} || ! -e $launcher_tmp ]] || rm -f -- "$launcher_tmp"
+    [[ -z ${metadata_tmp:-} || ! -e $metadata_tmp ]] || rm -f -- "$metadata_tmp"
+}
+trap cleanup EXIT
+
+printf 'Testing archive...\n'
+7z t -- "$archive" >/dev/null
+printf 'Extracting to a temporary directory...\n'
+7z x -y -o"$stage" -- "$archive" >/dev/null
+
+if find "$stage" -type l -print -quit | grep -q .; then
+    die "archives containing symbolic links are not supported"
+fi
+if find "$stage" -type f -print0 | python3 -c 'import os,sys; sys.exit(any(b"\\n" in p or b"\\r" in p for p in sys.stdin.buffer.read().split(b"\\0")))'; then
+    :
+else
+    die "archive filenames cannot contain newlines"
+fi
+
+selection_file="$stage/.240mp-selection"
+if ! python3 - "$stage" "$system" >"$selection_file" <<'PY'
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+requested = sys.argv[2]
+files = [p for p in root.rglob("*") if p.is_file() and p.name != ".240mp-selection"]
+
+extensions = {
+    "ps1": {".m3u", ".cue", ".chd", ".pbp"},
+    "nes": {".nes"},
+    "snes": {".sfc", ".smc"},
+    "megadrive": {".md", ".gen", ".smd", ".bin"},
+    "mastersystem": {".sms"},
+    "gamegear": {".gg"},
+    "gb": {".gb"},
+    "gbc": {".gbc"},
+    "gba": {".gba"},
+    "n64": {".z64", ".n64", ".v64"},
+    "pcengine": {".m3u", ".cue", ".chd", ".pce"},
+    "arcade": {".zip"},
+}
+priority = {
+    "ps1": [".m3u", ".cue", ".chd", ".pbp"],
+    "pcengine": [".m3u", ".cue", ".chd", ".pce"],
+}
+
+def matches(system):
+    allowed = extensions[system]
+    return [p for p in files if p.suffix.lower() in allowed]
+
+if requested == "auto":
+    # CD images with CUE are treated as PS1 by default; choose PC Engine manually.
+    cue_like = [p for p in files if p.suffix.lower() in {".cue", ".pbp"}]
+    if cue_like:
+        detected = "ps1"
+    else:
+        markers = {
+            "nes": {".nes"}, "snes": {".sfc", ".smc"},
+            "megadrive": {".md", ".gen", ".smd"}, "mastersystem": {".sms"},
+            "gamegear": {".gg"}, "gb": {".gb"}, "gbc": {".gbc"},
+            "gba": {".gba"}, "n64": {".z64", ".n64", ".v64"},
+            "pcengine": {".pce"}, "arcade": {".zip"},
+            "ps1": {".pbp"},
+        }
+        found = [
+            code for code, suffixes in markers.items()
+            if any(p.suffix.lower() in suffixes for p in files)
+        ]
+        if len(found) != 1:
+            names = ", ".join(found) if found else "none"
+            raise SystemExit(
+                f"Cannot identify one system automatically (candidates: {names}). "
+                "Select the console manually."
+            )
+        detected = found[0]
+else:
+    detected = requested
+
+candidates = matches(detected)
+if not candidates:
+    raise SystemExit(f"No supported ROM file found for system {detected}.")
+
+if detected in priority:
+    chosen_group = []
+    for suffix in priority[detected]:
+        chosen_group = [p for p in candidates if p.suffix.lower() == suffix]
+        if chosen_group:
+            break
+else:
+    chosen_group = candidates
+
+if len(chosen_group) != 1:
+    listed = ", ".join(str(p.relative_to(root)) for p in chosen_group[:8])
+    raise SystemExit(
+        f"Expected exactly one launchable ROM for {detected}; found {len(chosen_group)}: {listed}"
+    )
+
+print(detected)
+print(chosen_group[0].relative_to(root).as_posix())
+PY
+then
+    die "unable to identify a launchable ROM"
+fi
+
+mapfile -t selection <"$selection_file"
+rm -f -- "$selection_file"
+system=${selection[0]:-}
+content_relative=${selection[1]:-}
+[[ -n $system && -n $content_relative && -n ${SYSTEM_NAME[$system]+x} ]] \
+    || die "invalid system detection result"
+
+core_filename=""
+for candidate in ${CORE_CANDIDATES[$system]}; do
+    if [[ -r "$core_root/$candidate" ]]; then
+        core_filename=$candidate
+        break
+    fi
+done
+[[ -n $core_filename ]] || die \
+    "no compatible core installed for ${SYSTEM_NAME[$system]}; expected one of: ${CORE_CANDIDATES[$system]}"
+
+content_in_stage="$stage/$content_relative"
+if [[ ${content_in_stage,,} == *.cue ]]; then
+    cue_dir=$(dirname -- "$content_in_stage")
+    cue_refs=0
+    while IFS= read -r line || [[ -n $line ]]; do
+        reference=""
+        if [[ $line =~ ^[[:space:]]*[Ff][Ii][Ll][Ee][[:space:]]+\"([^\"]+)\" ]]; then
+            reference=${BASH_REMATCH[1]}
+        elif [[ $line =~ ^[[:space:]]*[Ff][Ii][Ll][Ee][[:space:]]+([^[:space:]]+)[[:space:]]+ ]]; then
+            reference=${BASH_REMATCH[1]}
+        fi
+        [[ -n $reference ]] || continue
+        ((cue_refs += 1))
+        [[ $reference != /* && $reference != *'..'* ]] || die "unsafe path in cue sheet: $reference"
+        [[ -f "$cue_dir/$reference" ]] || die "cue sheet references a missing file: $reference"
+    done <"$content_in_stage"
+    ((cue_refs > 0)) || die "cue sheet contains no FILE entries"
+fi
+
+slug=$(printf '%s' "$display_name" \
+    | iconv -f UTF-8 -t ASCII//TRANSLIT 2>/dev/null \
+    | tr '[:upper:]' '[:lower:]' \
+    | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//' || true)
+[[ -n $slug ]] || slug="game-$(printf '%s' "$display_name" | sha256sum | cut -c1-10)"
+
+system_rom_root="$rom_root/${ROM_FOLDER[$system]}"
+destination="$system_rom_root/$display_name"
+launcher="$launcher_root/launch-$system-$slug.sh"
+metadata="$launcher_root/launch-$system-$slug.txt"
+playlist="$playlist_root/${PLAYLIST[$system]}"
+installed_content="$destination/$content_relative"
+
+[[ ! -e $destination ]] || die "destination already exists: $destination"
+[[ ! -e $launcher && ! -e $metadata ]] || die "launcher already exists for: $display_name"
+mkdir -p -- "$system_rom_root" "$(dirname -- "$playlist")"
+
+{
+    printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail'
+    printf 'rom_folder=%q\n' "${ROM_FOLDER[$system]}"
+    printf 'content_relative=%q\n' "$content_relative"
+    printf 'core_filename=%q\n' "$core_filename"
+    cat <<'EOF'
+config="${XDG_CONFIG_HOME:-$HOME/.config}/retroarch/240mp-kms.cfg"
+core="${XDG_CONFIG_HOME:-$HOME/.config}/retroarch/cores/$core_filename"
+content="${RETRO_ROM_DIR:-$HOME/roms}/$rom_folder/$content_relative"
+log="${XDG_STATE_HOME:-$HOME/.local/state}/240-MP/retroarch.log"
+for required in "$config" "$core" "$content"; do
+    [[ -r $required ]] || { printf 'Required file is missing: %s\n' "$required" >&2; exit 2; }
+done
+mkdir -p -- "$(dirname -- "$log")"
+exec /usr/bin/retroarch --fullscreen --verbose --config "$config" -L "$core" "$content" >>"$log" 2>&1
+EOF
+} >"$launcher_tmp"
+chmod 0755 "$launcher_tmp"
+
+{
+    printf 'name = %s\n' "$display_name"
+    printf '%s\n' 'mode = takeover' "favorite = $favorite" 'confirm = no' 'args =' 'wait = pgroup' 'tty = no'
+} >"$metadata_tmp"
+
+printf 'Installing %s game files...\n' "${SYSTEM_NAME[$system]}"
+mv -- "$stage" "$destination"
+stage=""
+mv -- "$launcher_tmp" "$launcher"
+launcher_tmp=""
+mv -- "$metadata_tmp" "$metadata"
+metadata_tmp=""
+
+python3 - "$playlist" "$installed_content" "$display_name" "$core_root/$core_filename" "${SYSTEM_NAME[$system]}" <<'PY'
+import json
+import os
+from pathlib import Path
+import sys
+
+playlist_path = Path(sys.argv[1])
+content_path, label, core_path, system_name = sys.argv[2:]
+empty = {
+    "version": "1.5",
+    "default_core_path": "",
+    "default_core_name": "",
+    "label_display_mode": 0,
+    "right_thumbnail_mode": 0,
+    "left_thumbnail_mode": 0,
+    "thumbnail_match_mode": 0,
+    "sort_mode": 0,
+    "items": [],
+}
+
+if playlist_path.exists():
+    try:
+        data = json.loads(playlist_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"Cannot read playlist {playlist_path}: {exc}")
+else:
+    data = empty
+
+items = [item for item in data.get("items", []) if item.get("path") != content_path]
+items.append({
+    "path": content_path,
+    "label": label,
+    "core_path": core_path,
+    "core_name": system_name,
+    "crc32": "",
+    "db_name": system_name,
+})
+data["items"] = sorted(items, key=lambda item: item.get("label", "").casefold())
+
+temporary = playlist_path.with_name(playlist_path.name + ".tmp")
+temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+os.replace(temporary, playlist_path)
+PY
+
+mkdir -p -- "$data_root/retroarch/saves" "$data_root/retroarch/states"
+
+printf '\nInstalled: %s\n' "$display_name"
+printf 'System: %s\n' "${SYSTEM_NAME[$system]}"
+printf 'ROM directory: %s\n' "$destination"
+printf 'Launcher: %s\n' "$launcher"
+printf 'Playlist: %s\n' "$playlist"
+printf 'Archive retained: %s\n' "$archive"

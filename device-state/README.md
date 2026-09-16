@@ -13,8 +13,11 @@ Included:
   Xbox-compatible controller.
 - `retroarch/config/PCSX-ReARMed/`: non-secret core options.
 - `user_scripts/launch-retroarch.*`: generic 240-MP takeover launcher.
-- `local-bin/240mp-add-psx-game`: generic helper that installs a local game
-  archive and creates its launcher on the device.
+- `local-bin/240mp-add-retro-game`: multi-system helper that detects or accepts
+  a console, installs the ROM in its system directory, creates a 240-MP
+  launcher and updates the matching RetroArch playlist.
+- `local-bin/240mp-add-psx-game`: legacy PlayStation-only helper retained for
+  compatibility with existing launch workflows.
 
 Never commit Plex authentication files, private keys, ROMs, BIOS images,
 save files, state files, playlists, histories, logs or device caches. The
